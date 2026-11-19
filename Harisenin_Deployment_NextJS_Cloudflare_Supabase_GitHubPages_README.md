@@ -1,318 +1,682 @@
-# Deployment README --- Next.js + Cloudflare Workers + Supabase PostgreSQL + GitHub Pages
+# FULL DEPLOYMENT README
 
-Project: Harisenin Node.js REST API Part 3 + Next.js Part 1
+## Next.js + Cloudflare Workers + Supabase PostgreSQL + GitHub Pages
 
-> **Important:** Supabase uses PostgreSQL, not MySQL. Your current
-> backend uses Sequelize + MySQL. This deployment requires a database
-> migration and a compatibility review of the backend data-access layer.
-> Do not only replace the database URL and assume the MySQL code will
-> work unchanged.
+**Project:** Harisenin Node.js REST API Part 3 + Next.js Part 1\
+**Starting point:** This guide begins from the Supabase setup and
+MySQL-to-PostgreSQL migration, then continues to Cloudflare Workers and
+GitHub Pages.
 
-## Target architecture
+> **Important:** Supabase uses PostgreSQL, not MySQL. The original
+> backend uses Express + Sequelize + MySQL. We will migrate the database
+> to PostgreSQL, then adapt the Worker database layer using `pg` +
+> Cloudflare Hyperdrive. Express routes and the public API contract will
+> be preserved. Keep the original backend project as a backup.
+
+------------------------------------------------------------------------
+
+# 0. FINAL ARCHITECTURE
 
 ``` text
-Browser
-  |
-  v
-Next.js static export (GitHub Pages)
-  |
-  | HTTPS / JSON / JWT
-  v
-Express REST API (Cloudflare Workers)
-  |
-  | PostgreSQL driver + Hyperdrive
-  v
-Supabase PostgreSQL
+BROWSER
+   |
+   v
+NEXT.JS FRONTEND
+GitHub Pages (Static Export)
+   |
+   | HTTPS / JSON / JWT
+   v
+EXPRESS REST API
+Cloudflare Workers
+   |
+   | PostgreSQL connection
+   v
+CLOUDFLARE HYPERDRIVE
+   |
+   v
+SUPABASE POSTGRESQL
+users | posts
 ```
 
-Example production URLs (replace placeholders):
+Example production URLs (replace the placeholders):
 
 ``` text
 Frontend: https://GITHUB-USERNAME.github.io/REPOSITORY-NAME/
 Backend:  https://WORKER-NAME.WORKER-SUBDOMAIN.workers.dev
-Database: Supabase PostgreSQL project
+Database: Supabase PostgreSQL
 ```
 
-### Important hosting constraints
+## What each platform does
 
--   GitHub Pages only serves static files; it does not run a Next.js
-    Node server.
+  -----------------------------------------------------------------------
+  Platform                            Responsibility
+  ----------------------------------- -----------------------------------
+  Supabase                            Stores PostgreSQL data: users and
+                                      posts
+
+  Cloudflare Hyperdrive               Manages database connections from
+                                      Workers
+
+  Cloudflare Workers                  Runs the Express REST API and JWT
+                                      authentication
+
+  GitHub Pages                        Hosts the exported Next.js frontend
+
+  Next.js                             Displays pages and calls the
+                                      backend API
+  -----------------------------------------------------------------------
+
+## Important limitations
+
+-   GitHub Pages is static hosting. It does not run a Next.js Node.js
+    server.
 -   Next.js must use `output: "export"`.
 -   `getStaticProps()` and `getStaticPaths()` run during the build.
 -   New post slugs added after deployment require a new GitHub Actions
     build/deploy.
--   Login, register, profile, and users can work through browser-side
-    calls to the Worker API.
--   Never expose the Supabase database password, service-role key, or
-    JWT secret in frontend code.
+-   Login, register, profile, and users can call the Worker API from the
+    browser.
+-   Never expose Supabase database passwords, service-role keys, or JWT
+    secrets in frontend code.
 
 ------------------------------------------------------------------------
 
-# PART 0 --- Back up the current projects
+# PART 1 --- CREATE SUPABASE FROM ZERO
 
-Before changing anything, back up:
-
-``` text
-harisenin-nodejs-rest-api-part-3/
-harisenin-nextjs-part-1/
-```
-
-Export the local MySQL database from phpMyAdmin or DBeaver if it
-contains data you want to preserve.
-
-Create a Git checkpoint:
-
-``` bash
-git status
-git add .
-git commit -m "backup before Supabase and Cloudflare deployment"
-```
-
-Do not commit `.env`, `.env.local`, database passwords, JWT secrets, or
-service keys.
-
-------------------------------------------------------------------------
-
-# PART 1 --- Create Supabase PostgreSQL
-
-## 1. Create a project
+## 1. Create a Supabase Project
 
 1.  Open https://supabase.com/dashboard
-2.  Sign in and select **New project**.
-3.  Choose an organization.
-4.  Project name: `harisenin-bootcamp`.
-5.  Set a strong database password and store it securely.
-6.  Choose a region close to your users, such as Singapore if available.
-7.  Create the project and wait until it is ready.
+2.  Sign in or create an account.
+3.  Select **New project**.
+4.  Choose your organization.
+5.  Project name: `harisenin-bootcamp`.
+6.  Create a strong database password and store it safely.
+7.  Choose a region close to your users, such as Singapore if available.
+8.  Select **Create new project** and wait until the database is ready.
 
-Open the project's **SQL Editor**.
+### Screenshot reference --- Supabase dashboard
 
-## 2. Understand the MySQL-to-PostgreSQL change
+![Supabase database connection
+settings](https://obuldanrptloktxcffvn.supabase.co/storage/v1/object/public/images/integrations/readyset/screenshot-3.png?t=2024-07-19T14%3A31%3A22.455Z)
 
-Current:
+*Visual reference for the Supabase connection settings. Dashboard labels
+may change over time.*
+
+## 2. Open the Supabase Connect panel
+
+1.  Open your Supabase project.
+2.  Click **Connect** near the top of the project dashboard.
+3.  Choose the connection method you need.
+
+There are two separate connection use cases in this project:
+
+  -----------------------------------------------------------------------
+  Used by                             Connection choice
+  ----------------------------------- -----------------------------------
+  DBeaver on your laptop              Session Pooler is a practical
+                                      choice for IPv4-only local networks
+
+  Cloudflare Hyperdrive               Use the Supabase Direct connection
+                                      as shown in Cloudflare's Supabase
+                                      integration guide
+  -----------------------------------------------------------------------
+
+**Do not confuse the two connection strings.** DBeaver can use Session
+Pooler while Hyperdrive is configured separately with the Direct
+connection.
+
+Official guides: - Supabase connections:
+https://supabase.com/docs/guides/database/connecting-to-postgres -
+Cloudflare Hyperdrive + Supabase:
+https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/postgres-database-providers/supabase/
+
+## 3. Connect Supabase to DBeaver
+
+In the Supabase **Connect** panel, select:
+
+-   Connection method: **Session Pooler**
+-   Type: **URI**
+
+Copy the connection information. It may resemble:
 
 ``` text
-MySQL
-  ├── users
-  └── posts
+postgresql://postgres.PROJECT_REF:PASSWORD@aws-0-REGION.pooler.supabase.com:5432/postgres
 ```
 
-Target:
+Use the exact host, username, port, and database shown by your Supabase
+dashboard.
 
-``` text
-Supabase PostgreSQL
-  ├── public.users
-  └── public.posts
-```
+In DBeaver:
 
-PostgreSQL has different data types and SQL syntax. Review your actual
-Sequelize migrations and models before creating the final schema.
+1.  Open **Database → New Database Connection**.
+2.  Select **PostgreSQL**.
+3.  Fill in the values from Supabase:
 
-The SQL below assumes the `users` table has `id`, `name`, `email`,
-`password`, `created_at`, and `updated_at`. If your actual model uses
-different names (for example `full_name` or `password_hash`), adjust the
-SQL and repository code consistently.
+  DBeaver field   Value
+  --------------- -------------------------------------------------------------
+  Host            Session Pooler host from Supabase
+  Port            Port shown by Supabase (commonly `5432` for Session Pooler)
+  Database        `postgres`
+  Username        Exact Session Pooler username
+  Password        Your Supabase database password
+  SSL             Require
 
-## 3. Create schema for a fresh training database
+4.  Click **Test Connection**.
+5.  If the test succeeds, click **Finish**.
 
-Use this only if the existing MySQL records are disposable and you want
-to start with clean data.
+### Screenshot reference --- DBeaver PostgreSQL connection
 
-Run in Supabase SQL Editor:
+![DBeaver PostgreSQL connection
+dialog](https://dbeaver.com/wp-content/uploads/2022/03/connection-settings-postgresql.png)
 
-``` sql
-create table if not exists public.users (
-  id bigint generated by default as identity primary key,
-  name varchar(255) not null,
-  email varchar(255) not null unique,
-  password varchar(255) not null,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-
-create table if not exists public.posts (
-  id bigint generated by default as identity primary key,
-  user_id bigint not null references public.users(id)
-    on update cascade
-    on delete cascade,
-  title varchar(255) not null,
-  slug varchar(255) not null unique,
-  content text,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-
-create index if not exists posts_user_id_idx
-  on public.posts(user_id);
-
-create index if not exists posts_created_at_idx
-  on public.posts(created_at desc);
-```
-
-Notes: - `password` must contain a password hash, never plain-text
-passwords. - `posts.user_id` references `users.id`. - `slug` is unique
-because it identifies the detail URL. - `created_at` and `updated_at`
-receive a database default. - This schema is a template. Match it to
-your actual backend models.
-
-## 4. If you need to preserve existing MySQL data
-
-1.  Back up the MySQL database.
-2.  Read Supabase's MySQL migration guide:
-    https://supabase.com/kb/guides/migrate-from-mysql
-3.  Use Supabase's migration tool or `pgloader`.
-4.  Review converted PostgreSQL data types, indexes,
-    auto-increment/identity fields, foreign keys, and unique
-    constraints.
-5.  Verify row counts and relationships before switching production
-    traffic.
-
-Example `pgloader` configuration (replace all credentials; do not commit
-this file):
-
-``` lisp
-LOAD DATABASE
-  FROM mysql://MYSQL_USER:MYSQL_PASSWORD@MYSQL_HOST/MYSQL_DATABASE
-  INTO postgresql://postgres:SUPABASE_PASSWORD@SUPABASE_HOST:5432/postgres
-```
-
-Use the exact connection details shown in Supabase. URL-encode reserved
-characters in passwords. The precise `pgloader` options may need
-adjustment for your MySQL schema and pgloader version.
-
-Verify after migration:
-
-``` sql
-select count(*) from public.users;
-select count(*) from public.posts;
-
-select p.id, p.title, p.slug, u.email
-from public.posts p
-join public.users u on u.id = p.user_id
-order by p.id;
-```
-
-Do not delete the old MySQL database until the Supabase data is
-verified.
+If the connection fails, re-check the exact pooler host and username
+from Supabase. Do not guess the host or username.
 
 ------------------------------------------------------------------------
 
-# PART 2 --- Adapt the existing backend for Cloudflare Workers
+# PART 2 --- BACK UP AND MIGRATE MYSQL DATA
 
-## 5. Preserve the API contract
+## 4. Back up the MySQL database first
 
-Keep the existing public endpoints:
+Before exporting data: 1. Start MySQL in XAMPP. 2. Open DBeaver or
+phpMyAdmin. 3. Select the local database `fsd_bootcamp`. 4. Export a SQL
+backup. 5. Store the backup outside the project folder.
 
-  Method   Endpoint               Purpose
-  -------- ---------------------- ----------------------------
-  POST     `/api/auth/register`   Register
-  POST     `/api/auth/login`      Login and return JWT
-  GET      `/api/profile`         Current authenticated user
-  GET      `/api/users`           List users (protected)
-  GET      `/api/posts`           List posts
-  GET      `/api/posts/:slug`     Post detail by slug
+Do not delete the local MySQL database. Keep it until Supabase and the
+production API have been verified.
 
-The frontend should not need to know whether the backend uses Sequelize
-or `pg`. Keep the same endpoint paths and JSON response shape.
-
-Example:
-
-``` json
-{
-  "message": "Success",
-  "data": [
-    {
-      "id": 1,
-      "user_id": 1,
-      "title": "Belajar Next.js Routing",
-      "slug": "belajar-nextjs-routing",
-      "content": "Next.js Pages Router uses file-based routing."
-    }
-  ]
-}
-```
-
-Compare this with the actual response from your existing backend;
-preserve the real field names.
-
-## 6. Important Sequelize compatibility decision
-
-Your current backend uses:
+Expected source tables:
 
 ``` text
-Express + Sequelize + MySQL + mysql2
+fsd_bootcamp
+  |
+  +-- users
+  |
+  +-- posts
 ```
 
-The target is:
+## 5. Check the MySQL data before transfer
+
+The earlier transfer error showed this value:
 
 ``` text
-Express + Cloudflare Workers + Supabase PostgreSQL
+0000-00-00 00:00:00
 ```
 
-Cloudflare documents Express on Workers and PostgreSQL access through
-Hyperdrive using drivers such as `pg` and Postgres.js. Sequelize is not
-explicitly listed in the Hyperdrive driver examples. It may require
-runtime/pooling compatibility work.
+MySQL may contain zero dates, but PostgreSQL rejects them as invalid
+timestamps.
 
-**Recommended reliable approach:** keep the Express routes/controllers
-and public API contract, but move database queries into a
-repository/data-access layer using the documented `pg` driver with
-Hyperdrive. Replace Sequelize-specific model calls in controllers with
-repository functions.
+Open a SQL Editor connected to **MySQL**, not Supabase, and inspect
+`posts`:
 
-If you want to keep Sequelize, first make a separate
-proof-of-compatibility test for Sequelize + PostgreSQL + Hyperdrive on
-Workers. Do not migrate all controllers until that test succeeds.
+``` sql
+SELECT
+    id,
+    title,
+    created_at,
+    updated_at
+FROM posts
+WHERE
+    CAST(created_at AS CHAR) LIKE '0000-00-00%'
+    OR CAST(updated_at AS CHAR) LIKE '0000-00-00%';
+```
 
-Official references: - Express on Workers:
-https://developers.cloudflare.com/workers/tutorials/deploy-an-express-app/ -
-Hyperdrive PostgreSQL:
-https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/ -
-Hyperdrive + Supabase:
-https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/postgres-database-providers/supabase/
+If any rows are returned, correct them before transfer:
 
-## 7. Create the Worker project
+``` sql
+UPDATE posts
+SET created_at = CURRENT_TIMESTAMP
+WHERE CAST(created_at AS CHAR) LIKE '0000-00-00%';
 
-Create a separate deployment project first. This keeps your existing
-local Node.js backend intact while you adapt the Worker version.
+UPDATE posts
+SET updated_at = CURRENT_TIMESTAMP
+WHERE CAST(updated_at AS CHAR) LIKE '0000-00-00%';
+```
+
+If the original publication date is known, use that real date instead of
+the current timestamp.
+
+Repeat the inspection for `users` if those columns also contain
+timestamps:
+
+``` sql
+SELECT
+    id,
+    email,
+    created_at,
+    updated_at
+FROM users
+WHERE
+    CAST(created_at AS CHAR) LIKE '0000-00-00%'
+    OR CAST(updated_at AS CHAR) LIKE '0000-00-00%';
+```
+
+Correct any invalid values before transferring.
+
+## 6. Create the PostgreSQL tables in Supabase
+
+If you have already created `public.users` and `public.posts`, do not
+create them again. Check their columns first.
+
+For a fresh training database, open **Supabase → SQL Editor → New
+query** and run this example schema:
+
+``` sql
+CREATE TABLE IF NOT EXISTS public.users (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    password VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.posts (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES public.users(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    slug VARCHAR(255) NOT NULL UNIQUE,
+    content TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS posts_user_id_idx
+    ON public.posts(user_id);
+```
+
+**Important:** this example assumes your MySQL `users` table uses
+`name`, `email`, and `password`. If your actual Sequelize model uses
+different field names, match the PostgreSQL schema to the real model
+before transferring data.
+
+The `created_at` and `updated_at` columns have `DEFAULT NOW()`, so
+manual inserts can omit these columns.
+
+## 7. Transfer the `users` table with DBeaver
+
+Do this table first because `posts.user_id` references `users.id`.
+
+In DBeaver:
+
+1.  Expand the MySQL connection.
+2.  Expand database `fsd_bootcamp`.
+3.  Expand **Tables**.
+4.  Right-click the `users` table (not the database name).
+5.  Select **Export Data**.
+6.  Select **Database** as the target.
+7.  Click **Next**.
+8.  Click **Choose...** for Target container.
+9.  Select the Supabase PostgreSQL connection.
+10. Select database `postgres` and schema `public`.
+11. In Tables Mapping, map:
+
+  Source          Target
+  --------------- ---------------------------
+  MySQL `users`   PostgreSQL `public.users`
+
+12. Confirm column mappings.
+13. Review Data Load Settings.
+14. Start the transfer.
+
+### Screenshot reference --- DBeaver Data Transfer
+
+![DBeaver data transfer
+wizard](https://dbeaver.com/wp-content/uploads/2022/03/data-transfer.png)
+
+If your DBeaver version uses different labels, look for the target
+database/container and table mapping steps.
+
+## 8. Transfer the `posts` table
+
+Only do this after `users` has transferred successfully.
+
+Repeat the same process:
+
+1.  Right-click MySQL `posts`.
+2.  Select **Export Data**.
+3.  Target: Supabase PostgreSQL.
+4.  Target container: `public`.
+5.  Map:
+
+  Source          Target
+  --------------- ---------------------------
+  MySQL `posts`   PostgreSQL `public.posts`
+
+6.  Confirm that `id`, `user_id`, `title`, `slug`, `content`,
+    `created_at`, and `updated_at` map to the correct columns.
+7.  Start the transfer.
+
+If a transfer previously failed, check how many rows are already in
+Supabase before retrying. Do not blindly re-run a transfer that could
+duplicate primary keys.
+
+## 9. Verify migrated data in Supabase
+
+Open Supabase SQL Editor and run:
+
+``` sql
+SELECT COUNT(*) AS total_users
+FROM public.users;
+
+SELECT COUNT(*) AS total_posts
+FROM public.posts;
+
+SELECT
+    p.id,
+    p.user_id,
+    p.title,
+    p.slug,
+    p.created_at,
+    p.updated_at,
+    u.email
+FROM public.posts p
+JOIN public.users u
+    ON p.user_id = u.id
+ORDER BY p.id;
+```
+
+Check: - User count matches MySQL. - Post count matches MySQL. -
+`user_id` relationships are correct. - Slugs are present and unique. -
+No invalid timestamps remain. - Passwords are hashes, not plain text.
+
+If IDs were imported manually, synchronize PostgreSQL identity
+sequences:
+
+``` sql
+SELECT setval(
+    pg_get_serial_sequence('public.users', 'id'),
+    COALESCE(MAX(id), 1),
+    MAX(id) IS NOT NULL
+)
+FROM public.users;
+
+SELECT setval(
+    pg_get_serial_sequence('public.posts', 'id'),
+    COALESCE(MAX(id), 1),
+    MAX(id) IS NOT NULL
+)
+FROM public.posts;
+```
+
+**Checkpoint:** Supabase is ready only after the row counts and
+relationships have been checked.
+
+------------------------------------------------------------------------
+
+# PART 3 --- CREATE CLOUDFLARE WORKERS
+
+## 10. Create a Cloudflare account
+
+1.  Open https://dash.cloudflare.com/
+2.  Sign in or create an account.
+3.  Open **Workers & Pages**.
+
+### Screenshot reference --- Workers & Pages dashboard
+
+![Cloudflare Workers and Pages
+overview](https://xenodium.github.io/images/a-cloudflare-workers-primer-hello-world/cf-new-0.png)
+
+1.  Click **Create application**.
+2.  Select the Worker creation flow.
+3.  If you are using the terminal wizard, choose the following options.
+
+## 11. Create the Worker using the terminal wizard
+
+Open a terminal outside the Next.js project and run:
 
 ``` bash
-npm create cloudflare@latest harisenin-api-worker
+npm create cloudflare@latest
+```
+
+When prompted, use:
+
+  Prompt                  Selection
+  ----------------------- --------------------------
+  Application directory   `./harisenin-api-worker`
+  Start with              `Hello World example`
+  Template                **Worker only**
+  Language                JavaScript
+  Git                     Yes
+  Deploy now              No
+
+**Do not choose `SSR / full-stack app`.** The Next.js frontend is a
+separate project and will be hosted on GitHub Pages.
+
+Enter the Worker folder:
+
+``` bash
 cd harisenin-api-worker
-npm install express cors pg
+```
+
+Install packages:
+
+``` bash
+npm install express cors pg@8.16.3 bcryptjs jose
 npm install -D wrangler
+```
+
+Login:
+
+``` bash
 npx wrangler login
 ```
 
-Suggested structure:
+## 12. Worker project structure
+
+Create or arrange the project like this:
 
 ``` text
 harisenin-api-worker/
 |
 ├── src/
-│   ├── app.js
 │   ├── index.js
+│   ├── app.js
 │   ├── db.js
 │   ├── routes/
-│   ├── controllers/
-│   ├── middleware/
-│   └── repositories/
+│   │   ├── index.js
+│   │   ├── posts.js
+│   │   ├── auth.js
+│   │   └── users.js
+│   ├── repositories/
+│   │   ├── posts.js
+│   │   └── users.js
+│   └── middleware/
+│       └── auth.js
 |
 ├── package.json
 └── wrangler.jsonc
 ```
 
-Copy/reuse the existing routes, controllers, and middleware where
-possible. Move database-specific logic into `repositories/`.
+If `create-cloudflare` created a different starter file, keep the
+project configuration and replace/organize the application entry files
+as described below.
 
-## 8. Express application
+## 13. Important: Sequelize compatibility
 
-Create `src/app.js`:
+Your original backend:
+
+``` text
+Express
+  |
+  v
+Sequelize
+  |
+  v
+MySQL + mysql2
+```
+
+The new deployment:
+
+``` text
+Express
+  |
+  v
+PostgreSQL driver: pg
+  |
+  v
+Cloudflare Hyperdrive
+  |
+  v
+Supabase PostgreSQL
+```
+
+Cloudflare documents PostgreSQL Hyperdrive with the `pg` driver.
+Sequelize is not explicitly listed in the official Hyperdrive driver
+examples. Do not assume the current Sequelize connection pool and MySQL
+models will work unchanged in Workers.
+
+For this deployment: - Keep Express. - Keep the endpoint paths and JSON
+response contracts. - Reuse validation and business logic where
+possible. - Replace database calls with repository functions using
+`pg`. - Use PostgreSQL parameter placeholders such as `$1`, `$2`. - Test
+password hashing and JWT packages in Workers.
+
+If preserving Sequelize is required, first create a separate
+proof-of-compatibility test before porting the whole backend.
+
+Official references: - Express on Workers:
+https://developers.cloudflare.com/workers/tutorials/deploy-an-express-app/ -
+Hyperdrive PostgreSQL:
+https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/ -
+`pg` with Hyperdrive:
+https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/postgres-drivers-and-libraries/node-postgres/
+
+------------------------------------------------------------------------
+
+# PART 4 --- CONNECT CLOUDFLARE HYPERDRIVE TO SUPABASE
+
+## 14. Get the Supabase Direct Connection string
+
+For Hyperdrive, follow Cloudflare's Supabase integration guide and use
+the Supabase **Direct connection** string.
+
+In Supabase: 1. Open the project. 2. Click **Connect**. 3. Select
+**Direct connection**. 4. Choose URI format. 5. Copy the connection
+string securely.
+
+It resembles:
+
+``` text
+postgresql://postgres:YOUR_PASSWORD@db.YOUR_PROJECT_REF.supabase.co:5432/postgres
+```
+
+Use the exact host, username, port, and database from your Supabase
+project. Do not type the placeholders literally.
+
+Remember: - DBeaver may use Session Pooler. - Hyperdrive uses the Direct
+connection method in the Cloudflare Supabase guide.
+
+If your direct endpoint is unavailable in your network or account
+configuration, consult the current Supabase + Cloudflare guide before
+substituting a pooler URL.
+
+## 15. Create Hyperdrive
+
+### Option A --- Cloudflare Dashboard
+
+Open Cloudflare Dashboard → **Workers & Pages → Hyperdrive**.
+
+1.  Select **Create Configuration**.
+2.  Choose the public database connection option.
+3.  Enter a configuration name, for example `supabase-harisenin`.
+4.  Paste the Supabase Direct connection string.
+5.  Create the configuration.
+6.  Copy the generated Hyperdrive ID.
+
+### Screenshot reference --- Hyperdrive configuration
+
+![Cloudflare Hyperdrive create connection
+screen](https://cf-assets.www.cloudflare.com/zkvhlag99gkb/71rXsGZgXWem4yvkhdtHsP/55f9433b5447c09703ef39a547881497/image3.png)
+
+### Option B --- Wrangler CLI
+
+From the Worker project root:
+
+``` bash
+npx wrangler hyperdrive create supabase-harisenin \
+  --connection-string="YOUR_SUPABASE_DIRECT_CONNECTION_STRING"
+```
+
+Copy the Hyperdrive ID returned by Wrangler.
+
+**Security:** do not commit the connection string, paste it in public
+chat, or store it in frontend environment variables. If the database
+password contains reserved URL characters, URL-encode them in the
+connection string.
+
+## 16. Configure `wrangler.jsonc`
+
+Open the Worker project's `wrangler.jsonc`.
+
+Use:
+
+``` jsonc
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "harisenin-api-worker",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-19",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "YOUR_HYPERDRIVE_ID"
+    }
+  ]
+}
+```
+
+Replace `YOUR_HYPERDRIVE_ID` with the actual ID.
+
+For newer compatibility dates, Node.js compatibility may already be
+enabled by default, but keeping the flag is explicit and clear for this
+project.
+
+## 17. Create the database helper
+
+Create `src/db.js`:
+
+``` js
+import { env } from "cloudflare:workers";
+import { Client } from "pg";
+
+export async function query(text, values = []) {
+  const client = new Client({
+    connectionString: env.HYPERDRIVE.connectionString,
+  });
+
+  try {
+    await client.connect();
+
+    const result = await client.query(text, values);
+
+    return result;
+  } finally {
+    await client.end();
+  }
+}
+```
+
+Explanation: - `env.HYPERDRIVE.connectionString` comes from the
+Hyperdrive binding. - `pg` sends PostgreSQL queries. - Hyperdrive
+manages the underlying database connection pool. - Values are passed
+separately from SQL to reduce SQL injection risk.
+
+------------------------------------------------------------------------
+
+# PART 5 --- ADAPT EXPRESS AND PRESERVE THE API
+
+## 18. Create `src/app.js`
 
 ``` js
 import express from "express";
 import cors from "cors";
-import routes from "./routes/index.js";
+import apiRoutes from "./routes/index.js";
 
 const app = express();
 
@@ -342,7 +706,7 @@ app.get("/", (req, res) => {
   });
 });
 
-app.use("/api", routes);
+app.use("/api", apiRoutes);
 
 app.use((error, req, res, next) => {
   console.error(error);
@@ -356,16 +720,12 @@ app.use((error, req, res, next) => {
 export default app;
 ```
 
-Replace `GITHUB-USERNAME` with your actual GitHub username. If you use a
-custom domain, add its origin too.
+Replace `GITHUB-USERNAME` with the actual GitHub username. Add your
+custom domain origin if you use one.
 
-If your existing routes use CommonJS (`require` / `module.exports`),
-convert imports/exports consistently or configure the project for the
-module system you use. Do not mix module systems accidentally.
+CORS origin does not include the repository path `/REPOSITORY-NAME`.
 
-## 9. Cloudflare Worker entry point
-
-Create `src/index.js`:
+## 19. Create `src/index.js`
 
 ``` js
 import { httpServerHandler } from "cloudflare:node";
@@ -378,110 +738,13 @@ export default httpServerHandler({
 });
 ```
 
-This is Cloudflare's Express Worker pattern. It differs from the normal
-Node.js server entry point. Do not call `sequelize.authenticate()` at
-module startup in this Worker entry point.
+This is the Express-on-Workers entry pattern. It is different from the
+normal Node.js server entry point.
 
-## 10. Wrangler configuration
+Do not call `sequelize.authenticate()` at module startup in the Worker
+entry point.
 
-Create/update `wrangler.jsonc`:
-
-``` jsonc
-{
-  "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "harisenin-api-worker",
-  "main": "src/index.js",
-  "compatibility_date": "2026-11-19",
-  "compatibility_flags": [
-    "nodejs_compat"
-  ],
-  "hyperdrive": [
-    {
-      "binding": "HYPERDRIVE",
-      "id": "REPLACE_WITH_HYPERDRIVE_ID"
-    }
-  ]
-}
-```
-
-The Hyperdrive ID is generated in the next section.
-
-------------------------------------------------------------------------
-
-# PART 3 --- Connect Hyperdrive to Supabase
-
-## 11. Use Supabase Direct Connection with Hyperdrive
-
-Cloudflare's official Supabase + Hyperdrive guide says to use the
-Supabase **Direct connection** string, not the pooled connection
-strings. Hyperdrive provides the connection pooling for Workers.
-
-In Supabase: 1. Open the project. 2. Click **Connect** or open **Project
-Settings → Database**. 3. Find **Direct connection**. 4. Copy the
-connection string securely.
-
-It resembles:
-
-``` text
-postgresql://postgres:YOUR_DATABASE_PASSWORD@db.YOUR_PROJECT_REF.supabase.co:5432/postgres
-```
-
-Use the exact host, port, username, and database shown by Supabase. Do
-not type placeholders literally.
-
-If direct connection networking is unavailable in your environment,
-consult the current Supabase/Cloudflare integration instructions before
-substituting a pooler URL.
-
-## 12. Create Hyperdrive
-
-From the Worker project root:
-
-``` bash
-npx wrangler hyperdrive create supabase-harisenin \
-  --connection-string="YOUR_SUPABASE_DIRECT_CONNECTION_STRING"
-```
-
-Save the Hyperdrive ID. Do not publish or commit the connection string.
-
-Insert the generated ID in `wrangler.jsonc`:
-
-``` jsonc
-"hyperdrive": [
-  {
-    "binding": "HYPERDRIVE",
-    "id": "YOUR_GENERATED_HYPERDRIVE_ID"
-  }
-]
-```
-
-## 13. PostgreSQL helper using `pg`
-
-Create `src/db.js`:
-
-``` js
-import { env } from "cloudflare:workers";
-import { Client } from "pg";
-
-export async function query(text, values = []) {
-  const client = new Client({
-    connectionString: env.HYPERDRIVE.connectionString,
-  });
-
-  try {
-    await client.connect();
-    return await client.query(text, values);
-  } finally {
-    await client.end();
-  }
-}
-```
-
-This follows the Hyperdrive `pg` pattern: create a client for the
-request and let Hyperdrive manage the underlying database connection
-pool.
-
-## 14. Example posts repository
+## 20. Create posts repository
 
 Create `src/repositories/posts.js`:
 
@@ -498,7 +761,11 @@ export async function findAllPosts() {
        p.content,
        p.created_at,
        p.updated_at,
-       u.name AS author_name
+       json_build_object(
+         'id', u.id,
+         'name', u.name,
+         'email', u.email
+       ) AS "user"
      FROM public.posts p
      JOIN public.users u ON u.id = p.user_id
      ORDER BY p.created_at DESC`
@@ -517,7 +784,11 @@ export async function findPostBySlug(slug) {
        p.content,
        p.created_at,
        p.updated_at,
-       u.name AS author_name
+       json_build_object(
+         'id', u.id,
+         'name', u.name,
+         'email', u.email
+       ) AS "user"
      FROM public.posts p
      JOIN public.users u ON u.id = p.user_id
      WHERE p.slug = $1
@@ -529,23 +800,23 @@ export async function findPostBySlug(slug) {
 }
 ```
 
-PostgreSQL uses `$1`, `$2`, etc. for parameterized query values. Never
-concatenate user input into SQL.
+This assumes your PostgreSQL `users` table has `name` and `email`.
+Change the query if your real schema differs.
 
-The example assumes the schema in Section 3. Adjust it if your actual
-model has different fields.
+## 21. Create posts routes
 
-## 15. Keep the controller response contract
-
-Example controller pattern:
+Create `src/routes/posts.js`:
 
 ``` js
+import express from "express";
 import {
   findAllPosts,
   findPostBySlug,
 } from "../repositories/posts.js";
 
-export async function index(req, res, next) {
+const router = express.Router();
+
+router.get("/", async (req, res, next) => {
   try {
     const posts = await findAllPosts();
 
@@ -556,9 +827,9 @@ export async function index(req, res, next) {
   } catch (error) {
     return next(error);
   }
-}
+});
 
-export async function showBySlug(req, res, next) {
+router.get("/:slug", async (req, res, next) => {
   try {
     const post = await findPostBySlug(req.params.slug);
 
@@ -576,44 +847,120 @@ export async function showBySlug(req, res, next) {
   } catch (error) {
     return next(error);
   }
-}
+});
+
+export default router;
 ```
 
-Connect these functions to the existing route definitions. Keep
-`/api/posts` and `/api/posts/:slug` unchanged.
+Create `src/routes/index.js`:
 
-Apply the same repository approach to users and authentication. Password
-hashing and JWT validation must remain on the backend. Test your
-password-hashing and JWT packages in the Workers runtime; native Node
-dependencies may need Workers-compatible alternatives.
+``` js
+import express from "express";
+import postsRouter from "./posts.js";
 
-------------------------------------------------------------------------
+const router = express.Router();
 
-# PART 4 --- Secrets, Testing, and Deploying the Worker
+router.use("/posts", postsRouter);
 
-## 16. Store secrets
+// Add the adapted auth, profile, and users routers
+// after their PostgreSQL repositories are ready.
 
-Set the JWT secret:
+export default router;
+```
+
+**Checkpoint:** this example implements the two posts endpoints. The
+full API is not ready until auth, profile, and users are also adapted.
+
+## 22. Preserve all existing endpoints
+
+The deployed Worker must ultimately provide:
+
+  Method   Endpoint               Purpose
+  -------- ---------------------- ----------------------------
+  POST     `/api/auth/register`   Register
+  POST     `/api/auth/login`      Login and return JWT
+  GET      `/api/profile`         Current authenticated user
+  GET      `/api/users`           List users (protected)
+  GET      `/api/posts`           List posts
+  GET      `/api/posts/:slug`     Post detail by slug
+
+For user lookups, use parameterized SQL:
+
+``` js
+const result = await query(
+  `SELECT id, name, email, password
+   FROM public.users
+   WHERE email = $1
+   LIMIT 1`,
+  [email]
+);
+
+const user = result.rows[0] || null;
+```
+
+For user creation, hash the password first:
+
+``` js
+const result = await query(
+  `INSERT INTO public.users (name, email, password)
+   VALUES ($1, $2, $3)
+   RETURNING id, name, email, created_at`,
+  [name, email, passwordHash]
+);
+
+const user = result.rows[0];
+```
+
+For a public users list, never return the password hash:
+
+``` js
+const result = await query(
+  `SELECT id, name, email, created_at
+   FROM public.users
+   ORDER BY id DESC`
+);
+
+return result.rows;
+```
+
+### Authentication requirements
+
+-   Use `bcryptjs` to hash passwords and compare existing
+    bcrypt-compatible hashes.
+-   Use `jose` for JWT signing and verification in Workers.
+-   Store `JWT_SECRET` as a Worker secret.
+-   Never return password hashes.
+-   Never place JWT secret in Next.js.
+
+Set the secret:
 
 ``` bash
 npx wrangler secret put JWT_SECRET
 ```
 
-Enter the secret when prompted.
+The exact register/login body and JWT response property must match the
+existing backend. Inspect the original auth controller and validator
+before porting the logic.
 
-Store any other private auth configuration as Worker secrets. Hyperdrive
-provides the database connection through the `HYPERDRIVE` binding.
+JWT middleware must: 1. Read the `Authorization` header. 2. Require
+`Bearer <token>`. 3. Verify the token signature and expiration. 4.
+Extract the user ID from the verified token. 5. Attach the authenticated
+user ID to the request. 6. Return HTTP 401 for missing or invalid
+tokens.
 
-Never place the database password, service-role key, or JWT secret in
-the frontend or in a committed configuration file.
+------------------------------------------------------------------------
 
-## 17. Test locally
+# PART 6 --- TEST AND DEPLOY CLOUDFLARE WORKERS
+
+## 23. Run the Worker locally
+
+From the Worker project root:
 
 ``` bash
 npx wrangler dev
 ```
 
-Wrangler will show a local address, commonly:
+The local address is commonly:
 
 ``` text
 http://localhost:8787
@@ -627,26 +974,28 @@ GET http://localhost:8787/api/posts
 GET http://localhost:8787/api/posts/belajar-nextjs-routing
 ```
 
-Also test: - Register and login. - Protected profile and users. -
-Invalid/expired JWT. - Unknown slug. - Duplicate email. - Password
-hashing and verification.
+Then test: - Register. - Login. - Profile with a valid JWT. - Users with
+a valid JWT. - Missing JWT. - Invalid/expired JWT. - Duplicate email. -
+Unknown slug.
 
-Do not deploy until the API response matches the existing frontend's
-expectations.
+Do not deploy until all six endpoint groups work and return the expected
+JSON structure.
 
-## 18. Deploy
+## 24. Deploy the Worker
 
 ``` bash
 npx wrangler deploy
 ```
 
-Save the Worker URL, for example:
+Wrangler will output a URL similar to:
 
 ``` text
 https://harisenin-api-worker.YOUR_SUBDOMAIN.workers.dev
 ```
 
-Test production:
+Save this URL. It becomes the production API base URL for Next.js.
+
+Test:
 
 ``` text
 GET https://YOUR_WORKER_URL/
@@ -654,18 +1003,26 @@ GET https://YOUR_WORKER_URL/api/posts
 GET https://YOUR_WORKER_URL/api/posts/belajar-nextjs-routing
 ```
 
-Test all six existing API endpoints before moving to the frontend
-deployment.
-
 ------------------------------------------------------------------------
 
-# PART 5 --- Deploy Next.js to GitHub Pages
+# PART 7 --- DEPLOY NEXT.JS TO GITHUB PAGES
 
-## 19. Configure static export
+## 25. Understand static export
 
-Open `next.config.mjs`.
+GitHub Pages hosts static HTML, CSS, and JavaScript. It does not run a
+Next.js Node.js server.
 
-For a repository site:
+The existing Next.js Pages Router app can use static export: -
+`getStaticProps()` is supported. - `getStaticPaths()` is supported for
+dynamic routes when all paths are generated at build time. -
+Login/register/profile/users can call the Worker API in the browser. -
+New post slugs require another build and deployment.
+
+Official guide: https://nextjs.org/docs/pages/guides/static-exports
+
+## 26. Update `next.config.mjs`
+
+For a GitHub project site:
 
 ``` text
 https://GITHUB-USERNAME.github.io/REPOSITORY-NAME/
@@ -679,9 +1036,11 @@ const repoName = "REPOSITORY-NAME";
 const nextConfig = {
   output: "export",
   trailingSlash: true,
+
   images: {
     unoptimized: true,
   },
+
   basePath:
     process.env.NODE_ENV === "production"
       ? `/${repoName}`
@@ -693,65 +1052,44 @@ export default nextConfig;
 
 Replace `REPOSITORY-NAME` with the exact GitHub repository name.
 
-If the repository is named `GITHUB-USERNAME.github.io`, or you use a
+If the repository is named `GITHUB-USERNAME.github.io` or you use a
 custom domain at the root, omit `basePath`.
 
-## 20. Configure local environment variables
+## 27. Configure local environment variables
 
-In the Next.js project root, create `.env.local`:
+In the Next.js project root, `.env.local` remains:
 
 ``` env
 API_URL=http://localhost:3001
 NEXT_PUBLIC_API_URL=http://localhost:3001
 ```
 
-For production, GitHub Actions will provide:
+For GitHub Actions production build, use the deployed Worker URL:
 
 ``` text
 API_URL=https://YOUR_WORKER_URL
 NEXT_PUBLIC_API_URL=https://YOUR_WORKER_URL
 ```
 
-Meaning: - `API_URL` is read during build by `getStaticProps()` and
+Meaning: - `API_URL` is used during build by `getStaticProps()` and
 `getStaticPaths()`. - `NEXT_PUBLIC_API_URL` is embedded for browser-side
 login, register, profile, and users requests.
 
 Never put database credentials, Supabase service-role keys, or JWT
 secrets in these variables.
 
-## 21. Verify static data fetching
+## 28. Push the existing Next.js project to GitHub
 
-The posts list uses:
+1.  Open https://github.com/
+2.  Create a repository, for example `harisenin-nextjs-part-1`.
+3.  Push the existing Next.js project to the `main` branch.
+4.  Confirm it contains `package.json`, `pages/`, `components/`,
+    `styles/`, and `next.config.mjs`.
+5.  Make sure `.env.local` is not committed.
 
-``` text
-GET https://YOUR_WORKER_URL/api/posts
-```
+## 29. Create GitHub Actions workflow
 
-The dynamic detail page uses `getStaticPaths()` to read all slugs during
-build, then `getStaticProps()` to fetch each detail.
-
-The dynamic route should return:
-
-``` js
-return {
-  paths,
-  fallback: false,
-};
-```
-
-This ensures every slug is generated during the static build.
-
-Client-side pages such as login, register, profile, and users can call
-the Worker API after the browser loads. Profile and users requests must
-include the JWT bearer token.
-
-------------------------------------------------------------------------
-
-# PART 6 --- GitHub Actions Deployment
-
-## 22. Create the workflow
-
-In the Next.js repository, create:
+Inside the Next.js repository, create:
 
 ``` text
 .github/workflows/deploy.yml
@@ -785,7 +1123,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -794,7 +1132,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build static site
+      - name: Build Next.js static export
         run: npm run build
         env:
           API_URL: ${{ vars.API_URL }}
@@ -817,47 +1155,69 @@ jobs:
         uses: actions/deploy-pages@v4
 ```
 
-## 23. Configure GitHub Pages
+## 30. Configure GitHub Pages settings
 
-1.  Push the workflow to the `main` branch.
-2.  Open the GitHub repository.
-3.  Go to **Settings → Pages**.
-4.  Under Build and deployment, select **GitHub Actions**.
-5.  Open **Settings → Secrets and variables → Actions → Variables**.
-6.  Add:
+![GitHub Pages settings with GitHub Actions
+selected](https://dhrift.org/images/screenshots/github_pages_deploy_settings.png)
+
+In GitHub: 1. Open the Next.js repository. 2. Select **Settings**. 3.
+Select **Pages** in the sidebar. 4. Under **Build and deployment**, set
+Source to **GitHub Actions**.
+
+## 31. Add production variables
+
+Go to:
+
+**Settings → Secrets and variables → Actions → Variables**
+
+Add:
 
   Variable                Value
-  ----------------------- ---------------------
-  `API_URL`               Deployed Worker URL
-  `NEXT_PUBLIC_API_URL`   Deployed Worker URL
+  ----------------------- ---------------------------
+  `API_URL`               `https://YOUR_WORKER_URL`
+  `NEXT_PUBLIC_API_URL`   `https://YOUR_WORKER_URL`
 
-7.  Push changes to `main` or manually run the workflow.
+Use the actual Worker URL and do not add a trailing slash.
 
-The GitHub Actions build must be able to reach the Worker API because
-`getStaticProps()` and `getStaticPaths()` fetch posts during build.
+These are API base URLs, not secrets. Never add Supabase passwords,
+service-role keys, or JWT secrets here.
+
+## 32. Trigger GitHub Pages deployment
+
+From the Next.js project:
+
+``` bash
+git add .
+git commit -m "deploy Next.js to GitHub Pages"
+git push origin main
+```
+
+Open the repository's **Actions** tab and monitor the workflow.
+
+Expected: - Build succeeds. - The `out/` folder is uploaded. - Deploy
+job succeeds. - GitHub Pages publishes the site.
 
 ------------------------------------------------------------------------
 
-# PART 7 --- CORS and Production Testing
+# PART 8 --- CORS AND PRODUCTION TESTING
 
-## 24. CORS allowlist
+## 33. Configure CORS
 
-The Worker must allow these origins:
+The Worker must allow these exact origins:
 
 ``` text
 http://localhost:3000
 https://GITHUB-USERNAME.github.io
 ```
 
-CORS uses the origin only. It does not include `/REPOSITORY-NAME`.
+For a GitHub project site, the CORS origin does not include
+`/REPOSITORY-NAME`.
 
-If using a custom domain, add that domain's origin too.
+If you use a custom domain, add its origin too.
 
-Do not use wildcard `*` with credentialed browser requests.
+## 34. Test production API
 
-## 25. Test production endpoints
-
-Public:
+Public endpoints:
 
 ``` text
 GET https://YOUR_WORKER_URL/
@@ -865,7 +1225,7 @@ GET https://YOUR_WORKER_URL/api/posts
 GET https://YOUR_WORKER_URL/api/posts/belajar-nextjs-routing
 ```
 
-Authentication:
+Authentication endpoints:
 
 ``` text
 POST https://YOUR_WORKER_URL/api/auth/register
@@ -880,127 +1240,132 @@ Protected endpoints must include:
 Authorization: Bearer YOUR_JWT_TOKEN
 ```
 
-Frontend:
+## 35. Test the deployed frontend
+
+Open:
 
 ``` text
 https://GITHUB-USERNAME.github.io/REPOSITORY-NAME/
-https://GITHUB-USERNAME.github.io/REPOSITORY-NAME/about/
-https://GITHUB-USERNAME.github.io/REPOSITORY-NAME/posts/
-https://GITHUB-USERNAME.github.io/REPOSITORY-NAME/posts/belajar-nextjs-routing/
-https://GITHUB-USERNAME.github.io/REPOSITORY-NAME/login/
-https://GITHUB-USERNAME.github.io/REPOSITORY-NAME/register/
 ```
 
-Test: - Homepage and navigation. - Posts list from Supabase through
-Worker API. - Each generated slug detail page. - Register and login. -
-JWT bearer header. - Profile and users. - Invalid/expired JWT. - CORS
-from GitHub Pages. - Refreshing nested routes. - Unknown slug / 404.
+Test: - Homepage and navigation. - Posts list. - Every generated post
+detail slug. - Register. - Login. - JWT storage and bearer header. -
+Profile. - Users. - Invalid/expired JWT. - Browser CORS. - Refreshing
+nested routes. - Unknown slug / 404.
 
 ------------------------------------------------------------------------
 
-# PART 8 --- Updating Posts After Deployment
+# PART 9 --- ADDING NEW POSTS AFTER DEPLOYMENT
 
-GitHub Pages is static hosting. When a new post is added:
+GitHub Pages is static hosting. A new row in Supabase does not
+automatically create a new static detail page.
+
+When adding a new post:
 
 1.  Insert the post into Supabase.
 2.  Confirm `GET /api/posts` returns the new slug.
 3.  Run GitHub Actions again.
-4.  Next.js rebuilds the list of static paths.
-5.  GitHub Pages publishes the updated static site.
-
-A new database row does not automatically create a new static detail
-page.
+4.  Next.js calls `getStaticPaths()` during build.
+5.  Next.js generates the new detail page.
+6.  GitHub Pages publishes the updated static site.
 
 ------------------------------------------------------------------------
 
-# Troubleshooting
+# TROUBLESHOOTING
 
-## A. Worker returns 500 on database queries
+## A. Hyperdrive cannot connect to Supabase
 
 Check: - Hyperdrive binding exists in `wrangler.jsonc`. - Hyperdrive ID
-is correct. - Hyperdrive was created using Supabase Direct connection. -
-Supabase project is active. - Database host, username, and password are
-correct. - Table names and columns match the repository SQL.
+is correct. - Hyperdrive uses the Supabase Direct connection details. -
+Supabase project is active. - Host, username, password, port, and
+database are correct. - The Worker is using
+`env.HYPERDRIVE.connectionString`.
 
-## B. Worker module or Node API errors
+## B. Worker cannot find a module or Node API
 
-Check: - `nodejs_compat` is enabled. - Packages are compatible with
-Workers. - Native Node dependencies are not assumed to work. - Test
-password hashing and JWT packages independently.
+Check: - `nodejs_compat` is enabled. - Dependencies are compatible with
+Workers. - Native Node modules are not assumed to work. - Test
+`bcryptjs`, `jose`, and `pg` independently.
 
-## C. GitHub Actions fails fetching posts
+## C. `/api/posts` returns 500
 
-Check: - Worker has already been deployed. - `API_URL` is the deployed
-Worker URL. - `GET /api/posts` returns HTTP 200 and the expected JSON. -
-`getStaticPaths()` can retrieve the slug list. - The build is not still
-pointing to localhost.
+Check: - `public.posts` exists. - `public.users` exists. -
+`posts.user_id` references `users.id`. - SQL column names match the real
+schema. - Hyperdrive binding is available.
 
-## D. Browser CORS error
+## D. GitHub Actions build fails fetching posts
 
-Check: - Exact origin is `https://GITHUB-USERNAME.github.io`. - The
-Worker CORS allowlist includes it. - The browser API URL is the deployed
-Worker URL, not localhost.
+Check: - Worker has already been deployed. - `API_URL` repository
+variable points to the Worker. - `GET /api/posts` returns HTTP 200. -
+`getStaticPaths()` can retrieve the slug list. - Production build is not
+using localhost.
 
-## E. Detail page returns 404
+## E. Browser shows CORS error
+
+Check: - Exact GitHub Pages origin is allowed. - `NEXT_PUBLIC_API_URL`
+points to the deployed Worker. - Do not use localhost in production
+frontend variables.
+
+## F. Post detail page returns 404
 
 Check: - `GET /api/posts` includes the requested slug. -
 `getStaticPaths()` returns that slug. - `fallback` is `false`. - GitHub
-Actions was rerun after inserting a new post.
-
-## F. Database password authentication failed
-
-Check the exact connection details from Supabase. URL-encode reserved
-characters in passwords. Never paste a live connection string into
-GitHub or public chat.
+Actions was rerun after adding the new post.
 
 ------------------------------------------------------------------------
 
-# Final Checklist
+# FINAL DEPLOYMENT CHECKLIST
 
 ## Supabase
 
 ``` text
 [ ] Supabase project created
-[ ] PostgreSQL schema reviewed against current backend models
-[ ] users table exists
-[ ] posts table exists
-[ ] posts.user_id foreign key exists
-[ ] posts.slug unique constraint exists
+[ ] DBeaver connected to Supabase PostgreSQL
 [ ] MySQL backup completed
-[ ] Data migration completed or fresh seed data prepared
-[ ] User and post records verified
+[ ] Invalid zero dates corrected in MySQL
+[ ] users table transferred
+[ ] posts table transferred
+[ ] Row counts compared
+[ ] Foreign key verified
+[ ] Unique slug verified
+[ ] Timestamps verified
+[ ] Identity sequences synchronized
+[ ] Original MySQL backup retained
 ```
 
 ## Cloudflare Workers
 
 ``` text
-[ ] Worker project created
+[ ] Worker only project created
 [ ] Express app adapted for Workers
-[ ] nodejs_compat configured
-[ ] Hyperdrive connected to Supabase Direct connection
-[ ] PostgreSQL driver tested
-[ ] Existing routes reused
-[ ] Controllers use compatible data-access functions
-[ ] JWT signing and verification tested
-[ ] Password hashing tested in Workers
+[ ] nodejs_compat enabled
+[ ] Hyperdrive created
+[ ] Supabase Direct connection used for Hyperdrive
+[ ] Hyperdrive ID added to wrangler.jsonc
+[ ] pg installed
+[ ] Database helper tested
+[ ] Posts repository tested
+[ ] Auth/profile/users repositories adapted
+[ ] JWT secret stored as Worker secret
+[ ] Password hashing tested
 [ ] CORS allowlist configured
-[ ] Worker secrets configured
 [ ] Worker deployed
-[ ] All existing endpoints tested in production
+[ ] All six endpoint groups tested in production
 ```
 
-## GitHub Pages / Next.js
+## GitHub Pages
 
 ``` text
 [ ] output: "export" configured
-[ ] basePath configured if using repository site
+[ ] basePath configured for repository site if needed
 [ ] trailingSlash configured
 [ ] images unoptimized if using next/image
-[ ] API_URL points to Worker
-[ ] NEXT_PUBLIC_API_URL points to Worker
+[ ] .env.local not committed
+[ ] GitHub repository created
 [ ] GitHub Actions workflow created
-[ ] GitHub Pages set to GitHub Actions
-[ ] Repository variables configured
+[ ] GitHub Pages source set to GitHub Actions
+[ ] API_URL repository variable configured
+[ ] NEXT_PUBLIC_API_URL repository variable configured
 [ ] Static build succeeds
 [ ] Posts and slug pages generated
 [ ] Login/register/profile/users tested
@@ -1008,7 +1373,7 @@ GitHub or public chat.
 
 ------------------------------------------------------------------------
 
-# Official Documentation
+# OFFICIAL DOCUMENTATION
 
 ## Supabase
 
@@ -1021,41 +1386,49 @@ GitHub or public chat.
 
 ## Cloudflare
 
+-   Workers dashboard:
+    https://developers.cloudflare.com/workers/get-started/dashboard/
 -   Express on Workers:
     https://developers.cloudflare.com/workers/tutorials/deploy-an-express-app/
--   Hyperdrive overview: https://developers.cloudflare.com/hyperdrive/
--   Hyperdrive PostgreSQL:
-    https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/
+-   Hyperdrive getting started:
+    https://developers.cloudflare.com/hyperdrive/get-started/
 -   Hyperdrive + Supabase:
     https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/postgres-database-providers/supabase/
+-   `pg` with Hyperdrive:
+    https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/postgres-drivers-and-libraries/node-postgres/
 -   Wrangler: https://developers.cloudflare.com/workers/wrangler/
 
 ## Next.js and GitHub
 
--   Static export: https://nextjs.org/docs/pages/guides/static-exports
--   getStaticProps:
+-   Next.js static export:
+    https://nextjs.org/docs/pages/guides/static-exports
+-   `getStaticProps`:
     https://nextjs.org/docs/pages/building-your-application/data-fetching/get-static-props
--   getStaticPaths:
+-   `getStaticPaths`:
     https://nextjs.org/docs/pages/building-your-application/data-fetching/get-static-paths
--   GitHub Pages: https://docs.github.com/en/pages
+-   GitHub Pages publishing source:
+    https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site
+-   GitHub Actions: https://docs.github.com/en/actions
 
 ------------------------------------------------------------------------
 
-# Final Architecture Reminder
+# FINAL ARCHITECTURE REMINDER
 
 ``` text
-NEXT.JS (GitHub Pages)
-        |
-        | HTTPS REST API
-        v
-EXPRESS (Cloudflare Workers)
-        |
-        | Hyperdrive + pg
-        v
+NEXT.JS
+GitHub Pages
+    |
+    | HTTPS / JSON / JWT
+    v
+EXPRESS REST API
+Cloudflare Workers
+    |
+    | Hyperdrive + pg
+    v
 SUPABASE POSTGRESQL
 ```
 
-**Deployment principle:** preserve the public API contract, migrate the
-database carefully, adapt the backend runtime and data-access layer for
-Workers, and deploy the static Next.js frontend only after the
-production API is ready.
+**Deployment principle:** start with a verified Supabase database,
+deploy and test the Worker API, then build and deploy the Next.js static
+frontend. Keep the old MySQL backend and database as backups until the
+full production application has passed testing.
